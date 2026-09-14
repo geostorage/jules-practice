@@ -2,6 +2,73 @@ import customtkinter
 import json
 import os
 import datetime
+import base64
+import secrets
+import string
+import tkinter.messagebox
+from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+
+class PasswordVault:
+    def __init__(self, master_password):
+        self.master_password = master_password
+        self.vault_file = os.path.join(os.path.dirname(__file__), "vault.enc")
+        self.salt = None
+        self.key = None
+        self.fernet = None
+        self.passwords = []
+
+    def _generate_key(self, salt):
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=480000,
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(self.master_password.encode()))
+        return key
+
+    def setup_new(self):
+        self.salt = os.urandom(16)
+        self.key = self._generate_key(self.salt)
+        self.fernet = Fernet(self.key)
+        self.passwords = []
+        self.save()
+        return True
+
+    def load(self):
+        if not os.path.exists(self.vault_file):
+            return False
+
+        with open(self.vault_file, 'rb') as f:
+            file_data = f.read()
+
+        try:
+            # First 16 bytes is salt
+            self.salt = file_data[:16]
+            encrypted_data = file_data[16:]
+
+            self.key = self._generate_key(self.salt)
+            self.fernet = Fernet(self.key)
+
+            decrypted_data = self.fernet.decrypt(encrypted_data)
+            self.passwords = json.loads(decrypted_data.decode('utf-8'))
+            return True
+        except (InvalidToken, ValueError, Exception) as e:
+            return False
+
+    def save(self):
+        if not self.fernet:
+            return False
+
+        json_data = json.dumps(self.passwords, ensure_ascii=False).encode('utf-8')
+        encrypted_data = self.fernet.encrypt(json_data)
+
+        with open(self.vault_file, 'wb') as f:
+            f.write(self.salt + encrypted_data)
+        return True
 
 # 设置整体外观和颜色主题
 customtkinter.set_appearance_mode("Dark")
@@ -126,12 +193,131 @@ class App(customtkinter.CTk):
         self.todo_list_frame = customtkinter.CTkScrollableFrame(self.todo_frame, fg_color="transparent")
         self.todo_list_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 20))
 
+
         # 密码管理页面
         self.password_frame = customtkinter.CTkFrame(self, fg_color="transparent")
         self.password_frame.grid_columnconfigure(0, weight=1)
         self.password_frame.grid_rowconfigure(0, weight=1)
-        self.password_label = customtkinter.CTkLabel(self.password_frame, text="密码管理", font=customtkinter.CTkFont(family="MiSans", size=40, weight="bold"))
-        self.password_label.grid(row=0, column=0, sticky="nsew")
+
+
+        # 密码主框架（已解锁状态）
+        self.password_main_frame = customtkinter.CTkFrame(self.password_frame, fg_color="transparent")
+        self.password_main_frame.grid_columnconfigure(0, weight=3) # 左侧列表
+        self.password_main_frame.grid_columnconfigure(1, weight=5) # 右侧详情
+        self.password_main_frame.grid_rowconfigure(0, weight=1)
+
+        # === 左侧面板 (密码列表) ===
+        self.pwd_left_frame = customtkinter.CTkFrame(self.password_main_frame, fg_color="#252526")
+        self.pwd_left_frame.grid(row=0, column=0, sticky="nsew", padx=(10, 5), pady=10)
+        self.pwd_left_frame.grid_rowconfigure(2, weight=1)
+        self.pwd_left_frame.grid_columnconfigure(0, weight=1)
+        self.pwd_left_frame.grid_columnconfigure(1, weight=1)
+
+        # 搜索和筛选
+        self.pwd_search_entry = customtkinter.CTkEntry(self.pwd_left_frame, placeholder_text="搜索...", font=self.default_font)
+        self.pwd_search_entry.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 5))
+
+        self.pwd_tag_filter = customtkinter.CTkOptionMenu(self.pwd_left_frame, values=["全部", "工作", "个人", "金融", "其他"], font=self.default_font)
+        self.pwd_tag_filter.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
+
+        # 密码列表 (滚动)
+        self.pwd_list_frame = customtkinter.CTkScrollableFrame(self.pwd_left_frame, fg_color="transparent")
+        self.pwd_list_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=5, pady=(0, 10))
+
+        # 新增按钮 (放置在左下角)
+        self.pwd_add_btn = customtkinter.CTkButton(self.pwd_left_frame, text="+ 添加新密码", font=self.default_font, command=self.prepare_add_password)
+        self.pwd_add_btn.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
+
+
+
+
+        # 绑定搜索和筛选事件
+        self.pwd_search_entry.bind("<KeyRelease>", self.refresh_password_list)
+        self.pwd_tag_filter.configure(command=self.refresh_password_list)
+
+        # === 右侧面板 (详情编辑) ===
+
+        self.pwd_right_frame = customtkinter.CTkFrame(self.password_main_frame, fg_color="#2b2b2b")
+        self.pwd_right_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 10), pady=10)
+        self.pwd_right_frame.grid_columnconfigure(1, weight=1)
+
+        row_idx = 0
+
+        # 网站/应用名
+        lbl1 = customtkinter.CTkLabel(self.pwd_right_frame, text="网站/应用名：", font=self.default_font)
+        lbl1.grid(row=row_idx, column=0, sticky="e", padx=(20, 10), pady=(20, 10))
+        self.pwd_site_entry = customtkinter.CTkEntry(self.pwd_right_frame, font=self.default_font)
+        self.pwd_site_entry.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=(0, 20), pady=(20, 10))
+        row_idx += 1
+
+        # 用户名
+        lbl2 = customtkinter.CTkLabel(self.pwd_right_frame, text="用户名：", font=self.default_font)
+        lbl2.grid(row=row_idx, column=0, sticky="e", padx=(20, 10), pady=10)
+        self.pwd_user_entry = customtkinter.CTkEntry(self.pwd_right_frame, font=self.default_font)
+        self.pwd_user_entry.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=(0, 20), pady=10)
+        row_idx += 1
+
+        # 密码
+        lbl3 = customtkinter.CTkLabel(self.pwd_right_frame, text="密码：", font=self.default_font)
+        lbl3.grid(row=row_idx, column=0, sticky="e", padx=(20, 10), pady=10)
+
+        self.pwd_pwd_entry = customtkinter.CTkEntry(self.pwd_right_frame, font=self.default_font, show="•")
+        self.pwd_pwd_entry.grid(row=row_idx, column=1, sticky="ew", padx=(0, 5), pady=10)
+
+        self.pwd_toggle_btn = customtkinter.CTkButton(self.pwd_right_frame, text="👁", width=30, font=self.default_font, command=self.toggle_password_visibility)
+        self.pwd_toggle_btn.grid(row=row_idx, column=2, sticky="w", padx=(0, 20), pady=10)
+        row_idx += 1
+
+        # 密码生成 & 复制
+        self.pwd_gen_btn = customtkinter.CTkButton(self.pwd_right_frame, text="生成随机密码", font=self.default_font, command=self.generate_random_password)
+        self.pwd_gen_btn.grid(row=row_idx, column=1, sticky="w", padx=0, pady=(0, 10))
+
+        self.pwd_copy_btn = customtkinter.CTkButton(self.pwd_right_frame, text="一键复制", font=self.default_font, command=self.copy_password)
+        self.pwd_copy_btn.grid(row=row_idx, column=2, sticky="w", padx=(0, 20), pady=(0, 10))
+        row_idx += 1
+
+        # 分类标签
+        lbl4 = customtkinter.CTkLabel(self.pwd_right_frame, text="分类标签：", font=self.default_font)
+        lbl4.grid(row=row_idx, column=0, sticky="e", padx=(20, 10), pady=10)
+        self.pwd_tag_combo = customtkinter.CTkOptionMenu(self.pwd_right_frame, values=["工作", "个人", "金融", "其他"], font=self.default_font)
+        self.pwd_tag_combo.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=(0, 20), pady=10)
+        row_idx += 1
+
+        # 备注
+        lbl5 = customtkinter.CTkLabel(self.pwd_right_frame, text="备注：", font=self.default_font)
+        lbl5.grid(row=row_idx, column=0, sticky="ne", padx=(20, 10), pady=10)
+        self.pwd_notes_text = customtkinter.CTkTextbox(self.pwd_right_frame, font=self.default_font, height=100)
+        self.pwd_notes_text.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=(0, 20), pady=10)
+        row_idx += 1
+
+        # 操作按钮区
+        self.pwd_action_frame = customtkinter.CTkFrame(self.pwd_right_frame, fg_color="transparent")
+        self.pwd_action_frame.grid(row=row_idx, column=0, columnspan=3, sticky="ew", padx=20, pady=20)
+        self.pwd_action_frame.grid_columnconfigure(0, weight=1)
+        self.pwd_action_frame.grid_columnconfigure(1, weight=1)
+
+        self.pwd_save_btn = customtkinter.CTkButton(self.pwd_action_frame, text="保存", font=self.default_font, command=self.save_password_item)
+        self.pwd_save_btn.grid(row=0, column=0, padx=10, sticky="e")
+
+        self.pwd_delete_btn = customtkinter.CTkButton(self.pwd_action_frame, text="删除", font=self.default_font, fg_color="#c9302c", hover_color="#ac2925", command=self.delete_password_item)
+        self.pwd_delete_btn.grid(row=0, column=1, padx=10, sticky="w")
+
+        self.current_editing_index = -1
+
+        # 密码解锁/设置框架（未解锁状态）
+        self.password_auth_frame = customtkinter.CTkFrame(self.password_frame, fg_color="transparent")
+        self.password_auth_frame.grid_columnconfigure(0, weight=1)
+        self.password_auth_frame.grid_rowconfigure(0, weight=1)
+        self.password_auth_frame.grid_rowconfigure(3, weight=1)
+
+        self.auth_title = customtkinter.CTkLabel(self.password_auth_frame, text="欢迎使用密码本", font=customtkinter.CTkFont(family="MiSans", size=32, weight="bold"))
+        self.auth_title.grid(row=1, column=0, pady=(0, 20))
+
+        self.auth_entry = customtkinter.CTkEntry(self.password_auth_frame, font=self.default_font, show="*", width=300, placeholder_text="请输入主密码")
+        self.auth_entry.grid(row=2, column=0, pady=10)
+
+        self.auth_btn = customtkinter.CTkButton(self.password_auth_frame, text="确 认", font=self.default_font, command=self.unlock_vault)
+        self.auth_btn.grid(row=3, column=0, pady=10, sticky="n")
 
         # 桌面整理页面
         self.desktop_frame = customtkinter.CTkFrame(self, fg_color="transparent")
@@ -146,6 +332,10 @@ class App(customtkinter.CTk):
         self.settings_frame.grid_rowconfigure(0, weight=1)
         self.settings_label = customtkinter.CTkLabel(self.settings_frame, text="设置", font=customtkinter.CTkFont(family="MiSans", size=40, weight="bold"))
         self.settings_label.grid(row=0, column=0, sticky="nsew")
+
+        # 密码本状态
+        self.vault_unlocked = False
+        self.vault = None
 
 
         # 初始化时，默认选中并显示待办事项页面
@@ -348,10 +538,199 @@ class App(customtkinter.CTk):
             self.todo_frame.grid(row=0, column=1, sticky="nsew")
         elif name == "密码管理":
             self.password_frame.grid(row=0, column=1, sticky="nsew")
+            self.show_password_view()
         elif name == "桌面整理":
             self.desktop_frame.grid(row=0, column=1, sticky="nsew")
         elif name == "设置":
             self.settings_frame.grid(row=0, column=1, sticky="nsew")
+
+
+
+
+    def prepare_add_password(self):
+        self.pwd_site_entry.delete(0, 'end')
+        self.pwd_user_entry.delete(0, 'end')
+        self.pwd_pwd_entry.delete(0, 'end')
+        self.pwd_notes_text.delete("1.0", 'end')
+        self.pwd_tag_combo.set("其他")
+        self.current_editing_index = -1
+
+    def toggle_password_visibility(self):
+        if self.pwd_pwd_entry.cget("show") == "":
+            self.pwd_pwd_entry.configure(show="•")
+        else:
+            self.pwd_pwd_entry.configure(show="")
+
+    def generate_random_password(self):
+        chars = string.ascii_letters + string.digits + "!@#$%^&*()_+-="
+        while True:
+            pwd = ''.join(secrets.choice(chars) for _ in range(18))
+            if (any(c.islower() for c in pwd) and
+                any(c.isupper() for c in pwd) and
+                any(c.isdigit() for c in pwd) and
+                any(c in "!@#$%^&*()_+-=" for c in pwd)):
+                break
+        self.pwd_pwd_entry.delete(0, 'end')
+        self.pwd_pwd_entry.insert(0, pwd)
+        self.pwd_pwd_entry.configure(show="")
+
+    def copy_password(self):
+        pwd = self.pwd_pwd_entry.get()
+        if pwd:
+            self.clipboard_clear()
+            self.clipboard_append(pwd)
+            tkinter.messagebox.showinfo("成功", "密码已复制到剪贴板")
+
+
+
+    def save_password_item(self):
+        site = self.pwd_site_entry.get().strip()
+        user = self.pwd_user_entry.get().strip()
+        pwd = self.pwd_pwd_entry.get()
+        tag = self.pwd_tag_combo.get()
+        notes = self.pwd_notes_text.get("1.0", "end-1c").strip()
+
+        if not site or not pwd:
+            tkinter.messagebox.showerror("错误", "网站/应用名和密码不能为空！")
+            return
+
+        item = {
+            "site": site,
+            "user": user,
+            "password": pwd,
+            "tag": tag,
+            "notes": notes
+        }
+
+        if self.current_editing_index >= 0 and self.current_editing_index < len(self.vault.passwords):
+            self.vault.passwords[self.current_editing_index] = item
+        else:
+            self.vault.passwords.append(item)
+
+        self.vault.save()
+        self.refresh_password_list()
+        tkinter.messagebox.showinfo("成功", "保存成功")
+
+    def delete_password_item(self):
+        if self.current_editing_index >= 0 and self.current_editing_index < len(self.vault.passwords):
+            del self.vault.passwords[self.current_editing_index]
+            self.vault.save()
+            self.prepare_add_password()
+            self.refresh_password_list()
+            tkinter.messagebox.showinfo("成功", "删除成功")
+
+    def edit_password_item(self, index):
+        if 0 <= index < len(self.vault.passwords):
+            self.current_editing_index = index
+            item = self.vault.passwords[index]
+
+            self.pwd_site_entry.delete(0, 'end')
+            self.pwd_site_entry.insert(0, item.get("site", ""))
+
+            self.pwd_user_entry.delete(0, 'end')
+            self.pwd_user_entry.insert(0, item.get("user", ""))
+
+            self.pwd_pwd_entry.delete(0, 'end')
+            self.pwd_pwd_entry.insert(0, item.get("password", ""))
+            self.pwd_pwd_entry.configure(show="•")
+
+            self.pwd_tag_combo.set(item.get("tag", "其他"))
+
+            self.pwd_notes_text.delete("1.0", 'end')
+            self.pwd_notes_text.insert("1.0", item.get("notes", ""))
+
+
+
+    def refresh_password_list(self, *args):
+        for widget in self.pwd_list_frame.winfo_children():
+            widget.destroy()
+
+        if not self.vault:
+            return
+
+        search_kw = self.pwd_search_entry.get().lower()
+        filter_tag = self.pwd_tag_filter.get()
+
+        for i, item in enumerate(self.vault.passwords):
+            site = item.get("site", "")
+            user = item.get("user", "")
+            tag = item.get("tag", "")
+
+            if filter_tag != "全部" and tag != filter_tag:
+                continue
+            if search_kw and search_kw not in site.lower() and search_kw not in user.lower():
+                continue
+
+            frame = customtkinter.CTkFrame(self.pwd_list_frame, fg_color="#333333", corner_radius=5)
+            frame.grid(row=i, column=0, sticky="ew", padx=5, pady=5)
+            self.pwd_list_frame.grid_columnconfigure(0, weight=1)
+            frame.grid_columnconfigure(0, weight=1)
+
+            # 点击整个frame或者文字进行编辑
+            lbl = customtkinter.CTkLabel(frame, text=f"{site}\n{user}", font=self.default_font, anchor="w", justify="left")
+            lbl.grid(row=0, column=0, sticky="ew", padx=10, pady=5)
+
+            lbl.bind("<Button-1>", lambda e, idx=i: self.edit_password_item(idx))
+
+            # 上移/下移
+            up_btn = customtkinter.CTkButton(frame, text="↑", width=25, command=lambda idx=i: self.move_password(idx, -1))
+            up_btn.grid(row=0, column=1, padx=(5, 2))
+
+            dn_btn = customtkinter.CTkButton(frame, text="↓", width=25, command=lambda idx=i: self.move_password(idx, 1))
+            dn_btn.grid(row=0, column=2, padx=(2, 5))
+
+    def move_password(self, index, direction):
+        new_index = index + direction
+        if 0 <= new_index < len(self.vault.passwords):
+            self.vault.passwords.insert(new_index, self.vault.passwords.pop(index))
+            self.vault.save()
+            self.refresh_password_list()
+
+    def show_password_view(self):
+        if self.vault_unlocked:
+            self.password_auth_frame.grid_forget()
+            self.password_main_frame.grid(row=0, column=0, sticky="nsew")
+            # 刷新列表等
+            self.refresh_password_list()
+            self.prepare_add_password()
+        else:
+            self.password_main_frame.grid_forget()
+            self.password_auth_frame.grid(row=0, column=0, sticky="nsew")
+            self.auth_entry.delete(0, 'end')
+
+            vault_file = os.path.join(os.path.dirname(__file__), "vault.enc")
+            if not os.path.exists(vault_file):
+                self.auth_title.configure(text="首次使用，请设置主密码\n（重要：忘记无法恢复！）")
+                self.auth_btn.configure(text="设 置", command=self.setup_master_password)
+            else:
+                self.auth_title.configure(text="请输入主密码解锁")
+                self.auth_btn.configure(text="解 锁", command=self.unlock_vault)
+
+    def setup_master_password(self):
+        pwd = self.auth_entry.get()
+        if not pwd:
+            tkinter.messagebox.showerror("错误", "密码不能为空！")
+            return
+
+        self.vault = PasswordVault(pwd)
+        self.vault.setup_new()
+        self.vault_unlocked = True
+        self.show_password_view()
+
+    def unlock_vault(self):
+        pwd = self.auth_entry.get()
+        if not pwd:
+            tkinter.messagebox.showerror("错误", "密码不能为空！")
+            return
+
+        vault = PasswordVault(pwd)
+        if vault.load():
+            self.vault = vault
+            self.vault_unlocked = True
+            self.show_password_view()
+        else:
+            tkinter.messagebox.showerror("错误", "密码错误，解锁失败！")
+            self.auth_entry.delete(0, 'end')
 
     def todo_button_event(self):
         # 点击“待办事项”按钮触发的事件
