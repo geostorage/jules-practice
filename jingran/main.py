@@ -6,6 +6,11 @@ import base64
 import secrets
 import string
 import tkinter.messagebox
+import tkinter.ttk
+import tkinter.filedialog
+import shutil
+import csv
+import ctypes
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -322,9 +327,75 @@ class App(customtkinter.CTk):
         # 桌面整理页面
         self.desktop_frame = customtkinter.CTkFrame(self, fg_color="transparent")
         self.desktop_frame.grid_columnconfigure(0, weight=1)
-        self.desktop_frame.grid_rowconfigure(0, weight=1)
-        self.desktop_label = customtkinter.CTkLabel(self.desktop_frame, text="桌面整理", font=customtkinter.CTkFont(family="MiSans", size=40, weight="bold"))
-        self.desktop_label.grid(row=0, column=0, sticky="nsew")
+        self.desktop_frame.grid_rowconfigure(0, weight=0) # 顶部
+        self.desktop_frame.grid_rowconfigure(1, weight=1) # 中部 Treeview
+        self.desktop_frame.grid_rowconfigure(2, weight=0) # 底部
+
+        # 顶部：选择文件夹
+        self.desktop_top_frame = customtkinter.CTkFrame(self.desktop_frame, fg_color="transparent")
+        self.desktop_top_frame.grid(row=0, column=0, sticky="ew", padx=20, pady=20)
+
+        self.desktop_path_var = customtkinter.StringVar(value=os.path.join(os.path.expanduser("~"), "Desktop"))
+        self.desktop_select_btn = customtkinter.CTkButton(self.desktop_top_frame, text="选择文件夹", font=self.default_font, command=self.select_folder)
+        self.desktop_select_btn.grid(row=0, column=0, padx=(0, 10))
+
+        self.desktop_path_label = customtkinter.CTkLabel(self.desktop_top_frame, textvariable=self.desktop_path_var, font=self.default_font, text_color="gray60")
+        self.desktop_path_label.grid(row=0, column=1, sticky="w")
+
+        # 中部：表格（Treeview）
+        self.desktop_mid_frame = customtkinter.CTkFrame(self.desktop_frame)
+        self.desktop_mid_frame.grid(row=1, column=0, sticky="nsew", padx=20, pady=(0, 20))
+        self.desktop_mid_frame.grid_columnconfigure(0, weight=1)
+        self.desktop_mid_frame.grid_rowconfigure(0, weight=1)
+
+        # Style for Treeview
+        style = tkinter.ttk.Style()
+        style.theme_use("default")
+        style.configure("Treeview",
+                        background="#2b2b2b",
+                        foreground="white",
+                        fieldbackground="#2b2b2b",
+                        borderwidth=0,
+                        font=("MiSans", 12))
+        style.map("Treeview", background=[("selected", "#1f538d")])
+        style.configure("Treeview.Heading",
+                        background="#565b5e",
+                        foreground="white",
+                        relief="flat",
+                        font=("MiSans", 12, "bold"))
+        style.map("Treeview.Heading", background=[("active", "#1f538d")])
+
+        self.desktop_tree = tkinter.ttk.Treeview(self.desktop_mid_frame, columns=("origin", "new_path", "status"), show="headings", selectmode="extended")
+        self.desktop_tree.heading("origin", text="原文件名")
+        self.desktop_tree.heading("new_path", text="新路径")
+        self.desktop_tree.heading("status", text="状态")
+
+        self.desktop_tree.column("origin", width=200, anchor="w")
+        self.desktop_tree.column("new_path", width=300, anchor="w")
+        self.desktop_tree.column("status", width=150, anchor="center")
+
+        self.desktop_tree.grid(row=0, column=0, sticky="nsew")
+
+        self.desktop_tree_scroll = customtkinter.CTkScrollbar(self.desktop_mid_frame, command=self.desktop_tree.yview)
+        self.desktop_tree_scroll.grid(row=0, column=1, sticky="ns")
+        self.desktop_tree.configure(yscrollcommand=self.desktop_tree_scroll.set)
+
+        # 底部：按钮
+        self.desktop_bottom_frame = customtkinter.CTkFrame(self.desktop_frame, fg_color="transparent")
+        self.desktop_bottom_frame.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 20))
+        self.desktop_bottom_frame.grid_columnconfigure((0, 1, 2), weight=1)
+
+        self.desktop_scan_btn = customtkinter.CTkButton(self.desktop_bottom_frame, text="扫描预览", font=self.default_font, command=self.scan_preview)
+        self.desktop_scan_btn.grid(row=0, column=0, padx=10)
+
+        self.desktop_exec_btn = customtkinter.CTkButton(self.desktop_bottom_frame, text="执行整理", font=self.default_font, state="disabled", command=self.execute_organize)
+        self.desktop_exec_btn.grid(row=0, column=1, padx=10)
+
+        self.desktop_undo_btn = customtkinter.CTkButton(self.desktop_bottom_frame, text="撤销上次整理", font=self.default_font, fg_color="#8B0000", hover_color="#5C0000", command=self.undo_organize)
+        self.desktop_undo_btn.grid(row=0, column=2, padx=10)
+
+        # 待处理的文件列表 (预览状态)
+        self.desktop_preview_files = []
 
         # 设置页面 (占位)
         self.settings_frame = customtkinter.CTkFrame(self, fg_color="transparent")
@@ -747,6 +818,236 @@ class App(customtkinter.CTk):
     def settings_button_event(self):
         # 点击“设置”按钮触发的事件
         self.select_frame_by_name("设置")
+
+    # === 桌面整理功能方法 ===
+    def select_folder(self):
+        folder_path = tkinter.filedialog.askdirectory(initialdir=self.desktop_path_var.get(), title="选择要整理的文件夹")
+        if folder_path:
+            self.desktop_path_var.set(folder_path)
+            # 清空之前的预览
+            self.desktop_tree.delete(*self.desktop_tree.get_children())
+            self.desktop_preview_files = []
+            self.desktop_exec_btn.configure(state="disabled")
+
+    def _is_hidden(self, filepath):
+        if os.name == 'nt':
+            try:
+                attrs = ctypes.windll.kernel32.GetFileAttributesW(str(filepath))
+                return attrs != -1 and bool(attrs & 2)
+            except Exception:
+                return False
+        else:
+            return os.path.basename(filepath).startswith('.')
+
+    def _get_category_by_ext(self, ext):
+        ext = ext.lower()
+        if ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg']:
+            return "图片"
+        elif ext in ['.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.pdf', '.txt', '.md', '.csv']:
+            return "文档"
+        elif ext in ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv']:
+            return "视频"
+        elif ext in ['.mp3', '.wav', '.flac', '.aac', '.ogg']:
+            return "音频"
+        elif ext in ['.zip', '.rar', '.7z', '.tar', '.gz']:
+            return "压缩包"
+        else:
+            return "其他"
+
+    def scan_preview(self):
+        target_dir = self.desktop_path_var.get()
+        if not os.path.isdir(target_dir):
+            tkinter.messagebox.showerror("错误", "无效的文件夹路径！")
+            return
+
+        # 清空现有的树和列表
+        self.desktop_tree.delete(*self.desktop_tree.get_children())
+        self.desktop_preview_files = []
+
+        exclude_exts = ['.lnk', '.ini', '.exe']
+        exclude_files = ['desktop.ini']
+
+        try:
+            for item in os.listdir(target_dir):
+                item_path = os.path.join(target_dir, item)
+
+                # 排除文件夹
+                if os.path.isdir(item_path):
+                    continue
+
+                # 排除明确忽略的文件和隐藏文件
+                _, ext = os.path.splitext(item)
+                if ext.lower() in exclude_exts or item.lower() in exclude_files or self._is_hidden(item_path):
+                    continue
+
+                category = self._get_category_by_ext(ext)
+                new_path = os.path.join(target_dir, category, item)
+
+                self.desktop_preview_files.append({
+                    "origin": item_path,
+                    "filename": item,
+                    "new_path": new_path,
+                    "category": category
+                })
+        except Exception as e:
+            tkinter.messagebox.showerror("扫描失败", str(e))
+            return
+
+        if not self.desktop_preview_files:
+            tkinter.messagebox.showinfo("扫描完成", "未找到需要整理的文件。")
+            self.desktop_exec_btn.configure(state="disabled")
+            return
+
+        # 插入到 Treeview
+        for file_info in self.desktop_preview_files:
+            self.desktop_tree.insert("", "end", values=(file_info["filename"], file_info["new_path"], "待处理"))
+
+        self.desktop_exec_btn.configure(state="normal")
+
+    def execute_organize(self):
+        if not self.desktop_preview_files:
+            return
+
+        target_dir = self.desktop_path_var.get()
+        log_file_path = os.path.join(target_dir, "organize_log.csv")
+
+        # 获取Treeview的所有子项以便更新状态
+        tree_items = self.desktop_tree.get_children()
+
+        success_count = 0
+        log_entries = []
+
+        for index, file_info in enumerate(self.desktop_preview_files):
+            origin_path = file_info["origin"]
+            category_dir = os.path.join(target_dir, file_info["category"])
+            filename = file_info["filename"]
+            tree_item_id = tree_items[index]
+
+            if not os.path.exists(category_dir):
+                try:
+                    os.makedirs(category_dir)
+                except Exception as e:
+                    self.desktop_tree.set(tree_item_id, column="status", value=f"创建目录失败")
+                    continue
+
+            # 处理重名
+            base_name, ext = os.path.splitext(filename)
+            new_path = os.path.join(category_dir, filename)
+            counter = 1
+            while os.path.exists(new_path):
+                new_path = os.path.join(category_dir, f"{base_name}({counter}){ext}")
+                counter += 1
+
+            try:
+                shutil.move(origin_path, new_path)
+                status = "成功"
+                success_count += 1
+
+                # 记录日志
+                log_entries.append({
+                    "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "origin": origin_path,
+                    "new_path": new_path
+                })
+            except PermissionError:
+                status = "被占用/无权限"
+            except Exception as e:
+                status = f"失败: {str(e)[:10]}"
+
+            # 更新Treeview和列表信息
+            self.desktop_tree.set(tree_item_id, column="new_path", value=new_path)
+            self.desktop_tree.set(tree_item_id, column="status", value=status)
+            file_info["new_path"] = new_path
+
+        # 写入日志文件
+        if log_entries:
+            try:
+                file_exists = os.path.exists(log_file_path)
+                with open(log_file_path, mode="a", encoding="utf-8-sig", newline="") as f:
+                    writer = csv.DictWriter(f, fieldnames=["time", "origin", "new_path"])
+                    if not file_exists:
+                        writer.writeheader()
+                    writer.writerows(log_entries)
+            except Exception as e:
+                tkinter.messagebox.showwarning("日志警告", f"移动成功但日志写入失败: {e}")
+
+        # 禁用执行按钮，防止重复执行
+        self.desktop_exec_btn.configure(state="disabled")
+        tkinter.messagebox.showinfo("整理完成", f"共尝试 {len(self.desktop_preview_files)} 个文件，成功移动 {success_count} 个。")
+
+    def undo_organize(self):
+        target_dir = self.desktop_path_var.get()
+        log_file_path = os.path.join(target_dir, "organize_log.csv")
+
+        if not os.path.exists(log_file_path):
+            tkinter.messagebox.showinfo("提示", "未找到整理日志 (organize_log.csv)，无法撤销。")
+            return
+
+        if not tkinter.messagebox.askyesno("确认撤销", "这将会把上次整理的文件移回原处。确定要继续吗？"):
+            return
+
+        log_entries = []
+        try:
+            with open(log_file_path, mode="r", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    log_entries.append(row)
+        except Exception as e:
+            tkinter.messagebox.showerror("读取日志失败", str(e))
+            return
+
+        if not log_entries:
+            tkinter.messagebox.showinfo("提示", "日志为空，无需撤销。")
+            return
+
+        success_count = 0
+        fail_count = 0
+        new_log_entries = []
+
+        # 从后往前撤销，可以一定程度上处理同名覆盖带来的逻辑问题，不过这里我们加了(1)，影响不大
+        for entry in reversed(log_entries):
+            origin_path = entry.get("origin")
+            current_path = entry.get("new_path")
+
+            if not origin_path or not current_path or not os.path.exists(current_path):
+                fail_count += 1
+                new_log_entries.insert(0, entry) # 还原失败的，保留在日志中
+                continue
+
+            # 处理撤销时的原路径重名问题（极少发生，因为原本就在那里，除非这段时间又建了同名文件）
+            restore_path = origin_path
+            base_name, ext = os.path.splitext(os.path.basename(origin_path))
+            dir_name = os.path.dirname(origin_path)
+            counter = 1
+            while os.path.exists(restore_path):
+                restore_path = os.path.join(dir_name, f"{base_name}({counter}){ext}")
+                counter += 1
+
+            try:
+                shutil.move(current_path, restore_path)
+                success_count += 1
+            except Exception:
+                fail_count += 1
+                new_log_entries.insert(0, entry)
+
+        # 更新日志文件
+        try:
+            if not new_log_entries:
+                os.remove(log_file_path)
+            else:
+                with open(log_file_path, mode="w", encoding="utf-8-sig", newline="") as f:
+                    writer = csv.DictWriter(f, fieldnames=["time", "origin", "new_path"])
+                    writer.writeheader()
+                    writer.writerows(new_log_entries)
+        except Exception as e:
+            print(f"Failed to update log file: {e}")
+
+        # 清空视图
+        self.desktop_tree.delete(*self.desktop_tree.get_children())
+        self.desktop_preview_files = []
+
+        tkinter.messagebox.showinfo("撤销完成", f"撤销尝试结束。\n成功: {success_count}\n失败: {fail_count}")
+
 
 if __name__ == "__main__":
     app = App()
