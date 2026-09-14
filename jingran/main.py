@@ -1,6 +1,7 @@
 import customtkinter
 import json
 import os
+import datetime
 
 # 设置整体外观和颜色主题
 customtkinter.set_appearance_mode("Dark")
@@ -88,8 +89,31 @@ class App(customtkinter.CTk):
         self.priority_option = customtkinter.CTkOptionMenu(self.todo_header, values=["普通", "重要", "紧急"], font=self.default_font, width=80)
         self.priority_option.grid(row=0, column=1, padx=(0, 10))
 
-        self.deadline_entry = customtkinter.CTkEntry(self.todo_header, placeholder_text="截止时间,如: 2023-12-31 12:00", font=self.default_font, width=180, height=35)
-        self.deadline_entry.grid(row=0, column=2, padx=(0, 10))
+        # 截止时间下拉菜单组合
+        self.deadline_frame = customtkinter.CTkFrame(self.todo_header, fg_color="transparent")
+        self.deadline_frame.grid(row=0, column=2, padx=(0, 10))
+
+        current_year = datetime.datetime.now().year
+        years = [str(y) for y in range(current_year, current_year + 11)]
+        months = [f"{m:02d}" for m in range(1, 13)]
+        days = [f"{d:02d}" for d in range(1, 32)]
+        hours = [f"{h:02d}" for h in range(0, 24)]
+        minutes = [f"{m:02d}" for m in range(0, 60)]
+
+        self.year_option = customtkinter.CTkOptionMenu(self.deadline_frame, values=years, font=self.default_font, width=70)
+        self.year_option.grid(row=0, column=0, padx=(0, 5))
+
+        self.month_option = customtkinter.CTkOptionMenu(self.deadline_frame, values=months, font=self.default_font, width=60)
+        self.month_option.grid(row=0, column=1, padx=(0, 5))
+
+        self.day_option = customtkinter.CTkOptionMenu(self.deadline_frame, values=days, font=self.default_font, width=60)
+        self.day_option.grid(row=0, column=2, padx=(0, 10))
+
+        self.hour_option = customtkinter.CTkOptionMenu(self.deadline_frame, values=hours, font=self.default_font, width=60)
+        self.hour_option.grid(row=0, column=3, padx=(0, 5))
+
+        self.minute_option = customtkinter.CTkOptionMenu(self.deadline_frame, values=minutes, font=self.default_font, width=60)
+        self.minute_option.grid(row=0, column=4, padx=(0, 0))
 
         self.add_task_btn = customtkinter.CTkButton(self.todo_header, text="添加", font=self.default_font, width=60, height=35, command=self.add_task_event)
         self.add_task_btn.grid(row=0, column=3)
@@ -127,8 +151,19 @@ class App(customtkinter.CTk):
         # 初始化时，默认选中并显示待办事项页面
         self.select_frame_by_name("待办事项")
 
+        # 初始化截止时间为当前时间
+        self._reset_deadline_to_current_time()
+
         # 载入数据
         self.load_tasks()
+
+    def _reset_deadline_to_current_time(self):
+        now = datetime.datetime.now()
+        self.year_option.set(str(now.year))
+        self.month_option.set(f"{now.month:02d}")
+        self.day_option.set(f"{now.day:02d}")
+        self.hour_option.set(f"{now.hour:02d}")
+        self.minute_option.set(f"{now.minute:02d}")
 
     def add_task_event(self):
         text = self.task_entry.get().strip()
@@ -136,7 +171,13 @@ class App(customtkinter.CTk):
             return
 
         priority = self.priority_option.get()
-        deadline = self.deadline_entry.get().strip()
+
+        y = self.year_option.get()
+        m = self.month_option.get()
+        d = self.day_option.get()
+        h = self.hour_option.get()
+        minute = self.minute_option.get()
+        deadline = f"{y}-{m}-{d} {h}:{minute}"
 
         new_task = {
             "text": text,
@@ -149,7 +190,7 @@ class App(customtkinter.CTk):
         self.save_tasks()
 
         self.task_entry.delete(0, 'end')
-        self.deadline_entry.delete(0, 'end')
+        self._reset_deadline_to_current_time()
 
         self.refresh_task_list()
 
